@@ -31,6 +31,8 @@ class QuadrotorState(CustomPyTree):
     domega: jax.Array = field_jnp([0.0, 0.0, 0.0])
     motor_omega: jax.Array = field_jnp([0.0, 0.0, 0.0, 0.0])
     acc: jax.Array = field_jnp([0.0, 0.0, 0.0])
+    initial_p: jax.Array = field_jnp([0.0,0.0,0.0])
+    time_elapsed: jax.Array = field_jnp([0.0])
     dr_key: chex.PRNGKey = field_jnp(jax.random.key(0))
 
     def detached(self):
@@ -314,6 +316,9 @@ class Quadrotor:
         v = state.v
         omega = state.omega
         motor_omega = state.motor_omega
+        initial_p = state.initial_p
+        time_elapsed = state.time_elapsed
+        new_elapsed_time = time_elapsed + dt
 
         # domain randomization keys
         key_thrust, key_drag = jax.random.split(state.dr_key)
@@ -381,6 +386,7 @@ class Quadrotor:
             domega=domega_new,
             motor_omega=motor_omega_new,
             acc=acc,
+            time_elapsed = new_elapsed_time,
         )
 
     def motor_omega_to_thrust(self, motor_omega):

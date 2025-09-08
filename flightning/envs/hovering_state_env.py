@@ -19,6 +19,7 @@ from flightning.utils.math import smooth_l1, rot_to_quat
 from flightning.utils.random import random_rotation, key_generator
 import flightning.envs.env_base as env_base
 from flightning.envs.env_base import EnvTransition
+from flightning.simulation.traj_track import circular_trajectory
 
 
 @jdc.pytree_dataclass
@@ -57,6 +58,11 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         self.world_box = WorldBox(
             jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 3.0])
         )
+        self.init_location = WorldBox(
+            jnp.array([-0.5, -0.5, 0.3]), jnp.array([0.5, 0.5, 0.7])
+        )
+        self.circular_omega = 2.094
+        self.circular_radius = 1.5
         self.max_steps_in_episode = max_steps_in_episode
         self.dt = np.array(dt)
         # random state parameters
@@ -98,20 +104,20 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         p = jax.random.uniform(
             key_p,
             shape=(3,),
-            minval=self.world_box.min + self.margin,
-            maxval=self.world_box.max - self.margin,
+            minval=self.init_location.min, #+ self.margin,
+            maxval=self.init_location.max, #- self.margin,
         )
 
         rot = random_rotation(
-            key_R, self.yaw_scale, self.pitch_roll_scale, self.pitch_roll_scale
+            key_R, self.yaw_scale*0, self.pitch_roll_scale*0, self.pitch_roll_scale*0
         )
         R = rot.as_matrix()
-        v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
+        v = self.velocity_std * jax.random.normal(key_v, shape=(3,)) * 0.0
 
-        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,))
+        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,)) * 0.0
 
         quadrotor_state = self.quadrotor.create_state(
-            p=p, R=R, v=v, omega=omega, dr_key=key_dr
+            p=p, R=R, v=v, omega=omega, initial_p = p, time_elapsed = 0.0, dr_key=key_dr
         )
 
         last_actions = jnp.tile(
@@ -198,15 +204,28 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         p = next_state.quadrotor_state.p
         acc = next_state.quadrotor_state.acc
 
+        #trajectory
+        initial_p = jax.lax.stop_gradient(next_state.quadrotor_state.initial_p)
+        time_now = jax.lax.stop_gradient(next_state.quadrotor_state.time_elapsed)
+        current_p = jax.lax.stop_gradient(next_state.quadrotor_state.p)
+        centerpt = initial_p + jnp.array([-self.circular_radius, 0., 0.])
+        p_ref, vel_ref, _,_ = circular_trajectory(time_now, center=centerpt, R=self.circular_radius, omega=self.circular_omega, phi0=0.0, vz=0.0)
+        # jax.debug.print("time_elapsed = {t}, p_ref = {p}", t=time_now, p=p_ref)
+        # jax.debug.print("time_elapsed = {t}, v_ref = {v}", t=time_now, v=vel_ref)
+
         # compute lipschitz continuous reward
         pos_cost = (
-            smooth_l1(self.reward_sharpness * (p - self.goal))
+            smooth_l1(self.reward_sharpness * (p - p_ref))
             / self.reward_sharpness
         )
-        vel_cost = 0.1 * smooth_l1(next_state.quadrotor_state.v)
+        alt_cost = (
+            smooth_l1(self.reward_sharpness * (p[-1] - p_ref[-1]))
+            / self.reward_sharpness
+        )
+        vel_cost = smooth_l1(next_state.quadrotor_state.v - vel_ref)
         omega_cost = 0.1 * smooth_l1(next_state.quadrotor_state.omega)
         acc_cost = 0.1 * smooth_l1(acc)
-        goal_cost = pos_cost + vel_cost + omega_cost + acc_cost
+        goal_cost = pos_cost + vel_cost #+ omega_cost + acc_cost
 
         action_cost = smooth_l1(action - self.hovering_action)
         action_cost = self.action_penalty_weight * action_cost
@@ -215,7 +234,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         action_last = last_state.last_actions[-1]
         smoothness_cost = 0.01 * jnp.inner(action, action_last)
 
-        cost = goal_cost + action_cost + smoothness_cost
+        cost = goal_cost + action_cost + alt_cost #+ smoothness_cost
 
         # penalize collision
         time_left = self.max_steps_in_episode - next_state.step_idx
