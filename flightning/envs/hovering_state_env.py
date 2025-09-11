@@ -16,10 +16,13 @@ from flightning.utils import math as math_utils
 from flightning.utils import spaces
 from flightning.utils.pytrees import pytree_get_item, stack_pytrees
 from flightning.utils.math import smooth_l1, rot_to_quat
-from flightning.utils.random import random_rotation, key_generator
+from flightning.utils.random import random_rotation, key_generator, rotation_with_random
 import flightning.envs.env_base as env_base
 from flightning.envs.env_base import EnvTransition
 from flightning.simulation.traj_track import circular_trajectory
+
+import pandas as pd
+import jax.numpy as jnp
 
 
 @jdc.pytree_dataclass
@@ -33,6 +36,7 @@ class EnvState(env_base.EnvState):
     # last_actions[0] is the oldest action
     last_actions: jax.Array
     last_quadrotor_states: QuadrotorState
+    traj_idx: float
 
 
 class HoveringStateEnv(env_base.Env[EnvState]):
@@ -59,10 +63,18 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 3.0])
         )
         self.init_location = WorldBox(
-            jnp.array([-0.5, -0.5, 0.3]), jnp.array([0.5, 0.5, 0.7])
+            jnp.array([-0.6, -0.6, -0.3]), jnp.array([0.6, 0.6, 0.3])
         )
-        self.circular_omega = 2.094
-        self.circular_radius = 1.5
+        full_path_to_csv = "/home/yanrui/tempstorage4/rpg_flightning/flightning/simulation/trajectory.csv"
+        self.df = pd.read_csv(full_path_to_csv, index_col=0)
+        self.xyz = jnp.array(self.df[['x', 'y', 'z']].to_numpy())
+        self.traj_roll = jnp.array(self.df[['roll']].to_numpy())
+        self.traj_pitch = jnp.array(self.df[['pitch']].to_numpy())
+        self.traj_yaw = jnp.array(self.df[['yaw']].to_numpy())
+        self.traj_vel = jnp.array(self.df[['vx', 'vy', 'vz']].to_numpy())
+        self.traj_size = self.xyz.shape[0]
+        print(self.traj_size)
+        # print(self.traj_roll)
         self.max_steps_in_episode = max_steps_in_episode
         self.dt = np.array(dt)
         # random state parameters
@@ -100,24 +112,41 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         self, key, state: Optional[EnvState] = None
     ) -> tuple[EnvState, jax.Array]:
 
-        key_p, key_R, key_v, key_omega, key_dr = jax.random.split(key, 5)
-        p = jax.random.uniform(
+        key_p, key_R, key_v, key_omega, key_int, key_dr = jax.random.split(key, 6)
+        rand_int = jax.random.randint(key_int, shape=(), minval=0, maxval=self.traj_size)
+
+        init_p = self.xyz[rand_int]
+        delta_p = jax.random.uniform(
             key_p,
             shape=(3,),
             minval=self.init_location.min, #+ self.margin,
             maxval=self.init_location.max, #- self.margin,
         )
+        p = init_p + delta_p
 
-        rot = random_rotation(
-            key_R, self.yaw_scale*0, self.pitch_roll_scale*0, self.pitch_roll_scale*0
+        roll_init = self.traj_roll[rand_int,0]
+        yaw_init = self.traj_yaw[rand_int,0]
+        pitch_init = self.traj_pitch[rand_int,0]
+        
+        rot = rotation_with_random(
+            key_R, self.yaw_scale, self.pitch_roll_scale, self.pitch_roll_scale, yaw_init, pitch_init, roll_init
         )
         R = rot.as_matrix()
-        v = self.velocity_std * jax.random.normal(key_v, shape=(3,)) * 0.0
 
-        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,)) * 0.0
+        init_v = self.traj_vel[rand_int]
+        delta_v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
+        delta_v = jax.random.uniform(
+            key_v,
+            init_v.shape,
+            minval=0.5 * delta_v,
+            maxval=1.5 * delta_v,
+        )
+        v = init_v * delta_v
+
+        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,))
 
         quadrotor_state = self.quadrotor.create_state(
-            p=p, R=R, v=v, omega=omega, initial_p = p, time_elapsed = 0.0, dr_key=key_dr
+            p=p, R=R, v=v, omega=omega, dr_key=key_dr
         )
 
         last_actions = jnp.tile(
@@ -134,6 +163,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             quadrotor_state=quadrotor_state,
             last_actions=last_actions,
             last_quadrotor_states=last_quadrotor_states,
+            traj_idx = rand_int,
         )
 
         obs = self._get_obs(state)
@@ -179,11 +209,21 @@ class HoveringStateEnv(env_base.Env[EnvState]):
                 quadrotor_state, f_2, omega_2, dt_2
             )
 
+        last_traj_idx = state.traj_idx
+        next_idx = last_traj_idx + 1
+        next_idx = jax.lax.cond(
+            next_idx % self.traj_size == 0,
+            lambda x: 0,        # True branch
+            lambda x: x,        # False branch
+            operand=next_idx
+        )
+
         next_state = state.replace(
             time=state.time + self.dt,
             step_idx=state.step_idx + 1,
             quadrotor_state=quadrotor_state,
             last_actions=last_actions,
+            traj_idx = next_idx,
         )
 
         obs = self._get_obs(next_state)
@@ -205,27 +245,32 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         acc = next_state.quadrotor_state.acc
 
         #trajectory
-        initial_p = jax.lax.stop_gradient(next_state.quadrotor_state.initial_p)
-        time_now = jax.lax.stop_gradient(next_state.quadrotor_state.time_elapsed)
-        current_p = jax.lax.stop_gradient(next_state.quadrotor_state.p)
-        centerpt = initial_p + jnp.array([-self.circular_radius, 0., 0.])
-        p_ref, vel_ref, _,_ = circular_trajectory(time_now, center=centerpt, R=self.circular_radius, omega=self.circular_omega, phi0=0.0, vz=0.0)
+        # initial_p = jax.lax.stop_gradient(next_state.quadrotor_state.initial_p)
+        # time_now = jax.lax.stop_gradient(next_state.quadrotor_state.time_elapsed)
+        # current_p = jax.lax.stop_gradient(next_state.quadrotor_state.p)
+        # centerpt = initial_p + jnp.array([-self.circular_radius, 0., 0.])
+        # p_ref, vel_ref, _,_ = circular_trajectory(time_now, center=centerpt, R=self.circular_radius, omega=self.circular_omega, phi0=0.0, vz=0.0)
+        curr_idx = next_state.traj_idx        
+        
+        traj_pos = self.xyz[curr_idx]
+        traj_vel = self.traj_vel[curr_idx]
+
         # jax.debug.print("time_elapsed = {t}, p_ref = {p}", t=time_now, p=p_ref)
         # jax.debug.print("time_elapsed = {t}, v_ref = {v}", t=time_now, v=vel_ref)
 
         # compute lipschitz continuous reward
         pos_cost = (
-            smooth_l1(self.reward_sharpness * (p - p_ref))
+            smooth_l1(self.reward_sharpness * (p - traj_pos))
             / self.reward_sharpness
         )
         alt_cost = (
-            smooth_l1(self.reward_sharpness * (p[-1] - p_ref[-1]))
+            smooth_l1(self.reward_sharpness * (p[-1] - traj_pos[-1]))
             / self.reward_sharpness
         )
-        vel_cost = smooth_l1(next_state.quadrotor_state.v - vel_ref)
+        vel_cost = smooth_l1(next_state.quadrotor_state.v - traj_vel)
         omega_cost = 0.1 * smooth_l1(next_state.quadrotor_state.omega)
         acc_cost = 0.1 * smooth_l1(acc)
-        goal_cost = pos_cost + vel_cost #+ omega_cost + acc_cost
+        goal_cost = 5* pos_cost + vel_cost #+ omega_cost + acc_cost
 
         action_cost = smooth_l1(action - self.hovering_action)
         action_cost = self.action_penalty_weight * action_cost
@@ -234,7 +279,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         action_last = last_state.last_actions[-1]
         smoothness_cost = 0.01 * jnp.inner(action, action_last)
 
-        cost = goal_cost + action_cost + alt_cost #+ smoothness_cost
+        cost = goal_cost + 5* action_cost + alt_cost #+ smoothness_cost
 
         # penalize collision
         time_left = self.max_steps_in_episode - next_state.step_idx

@@ -49,7 +49,7 @@ def circular_trajectory(t, center=(0.,0.,0.), R=1.0, omega=1.0, phi0=0.0, vz=0.0
 if __name__ == "__main__":
     t = jnp.linspace(0, 10, 1000)
     pos, vel, acc, yaw = circular_trajectory(
-        t, center=(1.,2.,0.), R=1.5, omega=2.094, phi0=0.0, vz=0.1
+        t, center=(1.,2.,0.), R=1.5, omega=0.707, phi0=0.0, vz=0.1
     )
     print(pos[0,0])
     print(pos[0,1])
