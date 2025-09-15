@@ -196,7 +196,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         dt_1 = self.delay % self.dt
         action_1 = last_actions[0]
         f_1, omega_1 = action_1[0], action_1[1:]
-        quadrotor_state = self.quadrotor.step(
+        quadrotor_state = self.quadrotor.step_simple(
             state.quadrotor_state, f_1, omega_1, dt_1
         )
 
@@ -205,7 +205,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             dt_2 = self.dt - dt_1
             action_2 = last_actions[1]
             f_2, omega_2 = action_2[0], action_2[1:]
-            quadrotor_state = self.quadrotor.step(
+            quadrotor_state = self.quadrotor.step_simple(
                 quadrotor_state, f_2, omega_2, dt_2
             )
 

@@ -385,6 +385,65 @@ class Quadrotor:
             motor_omega=motor_omega_new,
             acc=acc,
         )
+    
+    def step_simple(
+            self,
+            state: QuadrotorState,
+            f_d: jax.Array,
+            omega_d: jax.Array,
+            dt: jax.Array,
+    ) -> QuadrotorState:
+        """
+        :param state: quadrotor state
+        :param f_d: cumulative thrust [N]
+        :param omega_d: commanded body rates [rad/s]
+        :param dt: time step length [s]
+        :return: next state of the quadrotor
+        """
+
+        # @partial(jax.custom_jvp, nondiff_argnums=(3,))
+        # def _step(state, f_d, omega_d, dt):
+        """Forward pass of the quadrotor dynamics."""
+
+        # round dt to 5 decimal places to avoid numerical issues
+        dt = np.round(dt, 5)
+        if dt <= 0.0:
+            return state
+
+        # def control_fn(state, _unused):
+        #     """
+        #     Low-level controller and dynamics.
+        #     Runs by default at 1 kHz.
+        #     """
+
+        #     motor_omega_d = self._low_level_controller(
+        #         state, f_d, omega_d
+        #     )
+
+        #     state = self._dynamics(
+        #         state, motor_omega_d, self._dt_low_level
+        #     )
+        #     return state, None
+
+        # N = np.ceil(dt / self._dt_low_level).item()
+        # # check if dt is a multiple of dt_low_level
+        # assert np.isclose(
+        #     N * self._dt_low_level, dt
+        # ), f"dt ({dt}) must be a multiple of dt_low_level ({self._dt_low_level})"
+
+        # state_new, _ = jax.lax.scan(control_fn, state, length=N)
+
+        p, R, v = state.p, state.R, state.v
+        a = f_d / self._mass
+        p_new, R_new, v_new = simple_dynamics(p = p,R = R,v = v,a = a, omega=omega_d,dt= dt)
+        
+
+        return state.replace(
+            p=p_new,
+            R=R_new,
+            v=v_new,
+        )
+
 
     def motor_omega_to_thrust(self, motor_omega):
         return self._thrust_map[0] * motor_omega ** 2
