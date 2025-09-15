@@ -135,7 +135,7 @@ def main():
     df = generate_circular_trajectory(
         radius=1.5,
         altitude=1.0,
-        speed=1.0,
+        speed=2.0,
         duration=10.0,
         dt=0.02,
         yaw_mode="fixed",
