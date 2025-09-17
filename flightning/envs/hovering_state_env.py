@@ -10,6 +10,7 @@ from jax import numpy as jnp
 from jax.scipy.spatial.transform import Rotation
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+from jax import lax
 
 from flightning.objects import Quadrotor, QuadrotorState, WorldBox
 from flightning.utils import math as math_utils
@@ -19,6 +20,7 @@ from flightning.utils.math import smooth_l1, rot_to_quat
 from flightning.utils.random import random_rotation, key_generator
 import flightning.envs.env_base as env_base
 from flightning.envs.env_base import EnvTransition
+from jax.numpy.linalg import norm
 
 
 @jdc.pytree_dataclass
@@ -53,10 +55,22 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         num_last_quad_states=10,
         margin=0.5,
     ):
-        self.goal: jnp.ndarray = jnp.array([0.0, 0.0, 1.0])
+        self.goal: jnp.ndarray = jnp.array([2.0, 0.0, 0.5])
+        self.vgoal: jnp.ndarray = jnp.array([5.0, 5.0, 0.0])
+        theta = jnp.deg2rad(10.0)
+        self.orientation_goal = jnp.array([
+            [1, 0, 0],
+            [0, jnp.cos(theta), -jnp.sin(theta)],
+            [0, jnp.sin(theta),  jnp.cos(theta)]
+        ])
         self.world_box = WorldBox(
-            jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 3.0])
+            jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 5.0])
         )
+        self.init_location = WorldBox(
+            jnp.array([0.0, -0.1, 0.3]), jnp.array([0.0, 0.1, 0.7])
+        )
+        self.window_centre: jnp.ndarray = jnp.array([1.0, 1.0, 0.5])
+        self.init_path:jnp.ndarray = jnp.array([0.0, 1.0, 0.5])
         self.max_steps_in_episode = max_steps_in_episode
         self.dt = np.array(dt)
         # random state parameters
@@ -98,17 +112,18 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         p = jax.random.uniform(
             key_p,
             shape=(3,),
-            minval=self.world_box.min + self.margin,
-            maxval=self.world_box.max - self.margin,
+            minval=self.init_location.min, #+ self.margin,
+            maxval=self.init_location.max #- self.margin,
         )
+
 
         rot = random_rotation(
-            key_R, self.yaw_scale, self.pitch_roll_scale, self.pitch_roll_scale
+            key_R, self.yaw_scale*0, self.pitch_roll_scale*0, self.pitch_roll_scale*0
         )
         R = rot.as_matrix()
-        v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
+        v = self.velocity_std * jax.random.normal(key_v, shape=(3,)) * 0
 
-        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,))
+        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,)) * 0
 
         quadrotor_state = self.quadrotor.create_state(
             p=p, R=R, v=v, omega=omega, dr_key=key_dr
@@ -196,6 +211,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
     ) -> jax.Array:
         action = next_state.last_actions[-1]
         p = next_state.quadrotor_state.p
+        v = next_state.quadrotor_state.v
         acc = next_state.quadrotor_state.acc
 
         # compute lipschitz continuous reward
@@ -215,7 +231,101 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         action_last = last_state.last_actions[-1]
         smoothness_cost = 0.01 * jnp.inner(action, action_last)
 
-        cost = goal_cost + action_cost + smoothness_cost
+        #Passing window cost
+        last_p = last_state.quadrotor_state.p
+        x_last_diff = last_p[0] - 1.0
+        x_next_diff = p[0] - 1.0
+
+        def so3_distance_atan2(R, R_tgt, eps=1e-9):
+            """
+            Geodesic distance using atan2 for better numerical stability.
+            Works with shapes (..., 3, 3).
+            Returns radians.
+            """
+            R_rel = jnp.matmul(jnp.swapaxes(R_tgt, -1, -2), R)
+            # sine-like term from skew part
+            x = R_rel[..., 2, 1] - R_rel[..., 1, 2]
+            y = R_rel[..., 0, 2] - R_rel[..., 2, 0]
+            z = R_rel[..., 1, 0] - R_rel[..., 0, 1]
+            s = 0.5 * jnp.linalg.norm(jnp.stack([x, y, z], axis=-1), axis=-1)
+            c = jnp.clip((jnp.trace(R_rel, axis1=-2, axis2=-1) - 1.0) * 0.5, -1.0, 1.0)
+            return jnp.arctan2(jnp.maximum(s, 0.0), c + eps)
+
+        def reward_fn(_):
+            a_loss = smooth_l1(self.reward_sharpness * (p - self.window_centre)) / self.reward_sharpness
+            b_loss = so3_distance_atan2(last_state.quadrotor_state.R, self.orientation_goal)
+            return 5*a_loss #+ 5*b_loss
+        def zero_fn(_):
+            # pos_cost = (
+            # smooth_l1(self.reward_sharpness * (p - self.goal))
+            # / self.reward_sharpness
+            # )
+            # vel_cost = 0.1 * smooth_l1(next_state.quadrotor_state.v)
+            # omega_cost = 0.1 * smooth_l1(next_state.quadrotor_state.omega)
+            # acc_cost = 0.1 * smooth_l1(acc)
+            # goal_cost = pos_cost + vel_cost + omega_cost + acc_cost
+
+            return 0.0
+        
+        def point_to_segment_dist(p, a, b):
+            ab = b - a
+            ap = p - a
+            t = jnp.clip(jnp.dot(ap, ab) / jnp.dot(ab, ab), 0.0, 1.0)
+            proj = a + t * ab
+            return jnp.linalg.norm(p - proj)
+        
+        d1 = point_to_segment_dist(p, self.init_path, self.window_centre)
+        d2 = point_to_segment_dist(p, self.window_centre, self.goal)
+        min_dist = jnp.minimum(d1, d2)
+
+        # pos_circular_cost = (
+        #     smooth_l1(self.reward_sharpness * (p[0] - self.goal[0]))
+        #     / self.reward_sharpness
+        # )
+
+        # v_norm = norm(v)
+        # def pre_path_fn(_):
+        #     unit_vect = (self.window_centre - p) / norm(p - self.window_centre) 
+        #     unit_p_vect = (v) / norm(v)
+        #     c_loss = jnp.dot(unit_vect, unit_p_vect)
+        #     return -c_loss
+        # def post_path_fn(_):
+        #     unit_vect = (p - self.goal) / norm(p - self.goal) 
+        #     unit_p_vect = (v) / norm(v)
+        #     c_loss = jnp.dot(unit_vect, unit_p_vect)
+        #     return -c_loss
+
+        
+        passing_cost = lax.cond(
+            (jnp.sign(x_last_diff) < 0) & (jnp.sign(x_next_diff) > 0),
+            reward_fn,
+            zero_fn,
+            operand=None
+        )
+        
+        # path_cost = lax.cond(
+        #     (p[0] < 2.5) & (p[0] > 0.5),
+        #     pre_path_fn,
+        #     zero_fn,
+        #     operand=None
+        # )
+
+        # path_cost2 = lax.cond(
+        #     (p[0] > 2.5) & (p[0] < 5.0),
+        #     post_path_fn,
+        #     zero_fn,
+        #     operand=None
+        # )
+
+        
+        # unit_pre_vect = (self.window_centre - p) / norm(p - self.window_centre) 
+        # unit_post_vect = (self.goal - p) / norm(p - self.goal) 
+        # unit_v = (v) / norm(v)
+        # logic = jnp.sign(x_next_diff) < 0
+        # path_cost = logic * jnp.dot(unit_v, unit_pre_vect) + (1 - logic) * jnp.dot(unit_v, unit_post_vect)
+
+
+        cost = smoothness_cost + goal_cost + action_cost + passing_cost*50  #+ 0.5*action_cost #+ 
 
         # penalize collision
         time_left = self.max_steps_in_episode - next_state.step_idx
@@ -223,7 +333,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             self._is_colliding(next_state), time_left * cost, 0.0
         )
         # cost += collision_cost
-        cost += jax.lax.stop_gradient(collision_cost)
+        # cost += jax.lax.stop_gradient(collision_cost)
 
         # scale by time
         reward = -self.dt * cost
@@ -335,9 +445,10 @@ class HoveringStateEnv(env_base.Env[EnvState]):
     def plot_trajectories(self, traj: EnvTransition):
         assert traj.reward.ndim == 2
         num_trajs = traj.reward.shape[0]
-        fig, (ax1, ax2) = plt.subplots(ncols=2)
+        fig, (ax1, ax2, ax3) = plt.subplots(ncols=3)
         state: EnvState = traj.state
         done = np.logical_or(traj.terminated, traj.truncated)
+        X_list, Y_list, Z_list, T_list, R_list, idx_list = [], [], [], [], [], []
 
         for i in range(num_trajs):
             # find first index where truncated or terminated is true
@@ -347,6 +458,14 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             z = state.quadrotor_state.p[i, :idx, 2]
             R = state.quadrotor_state.R[i, :idx]
             t = state.time[i, :idx]
+
+            X_list.append(state.quadrotor_state.p[i, :idx, 0].copy())
+            Y_list.append(state.quadrotor_state.p[i, :idx, 1].copy())
+            Z_list.append(state.quadrotor_state.p[i, :idx, 2].copy())
+            T_list.append(state.time[i, :idx].copy())
+            R_list.append(state.quadrotor_state.R[i, :idx].copy()) 
+            idx_list.append(idx)
+
             ax1.plot(x, y)
             if i == 0:
                 ax1.scatter(x[0], y[0], color="green", label="start")
@@ -373,6 +492,19 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             ax2.plot(t, z)
             ax2.set_ylabel("z")
             ax2.set_xlabel("Time")
+
+            ax3.plot(x,z)
+            ax3.set_ylabel("z")
+            ax3.set_xlabel("x")
+
+        X = np.array(X_list, dtype=object)
+        Y = np.array(Y_list, dtype=object)
+        Z = np.array(Z_list, dtype=object)
+        T = np.array(T_list, dtype=object)
+        R = np.array(R_list, dtype=object)
+        IDX=np.array(idx_list, dtype=object)
+        traj_dict = {"x": X, "y": Y, "z": Z, "t": T, "R": R, "IDX":IDX}
+        np.savez_compressed("traj_data.npz", **traj_dict)
         fig.show()
 
 

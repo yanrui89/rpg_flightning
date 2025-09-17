@@ -10,6 +10,7 @@ from jax import numpy as jnp
 from flightning.simulation.model_body_drag import (
     BodyDragParams,
     compute_drag_force,
+    compute_rotor_drag_force,
 )
 from flightning.utils.math import rotation_matrix_from_vector
 
@@ -238,7 +239,7 @@ class Quadrotor:
 
         @partial(jax.custom_jvp, nondiff_argnums=(3,))
         def _step(state, f_d, omega_d, dt):
-            """Forward pass of the quadrotor dynamics."""
+        #     """Forward pass of the quadrotor dynamics."""
 
             # round dt to 5 decimal places to avoid numerical issues
             dt = np.round(dt, 5)
@@ -340,7 +341,9 @@ class Quadrotor:
         # Quadratic drag model
         f_drag = compute_drag_force(state, key_drag, self._drag_params)
 
-        f_vec = jnp.array([0, 0, jnp.sum(f)]) + f_drag
+        f_rotor_drag = compute_rotor_drag_force(state, key_drag, self._drag_params)
+
+        f_vec = jnp.array([0, 0, jnp.sum(f)]) + f_drag #+ f_rotor_drag
         acc = self._gravity + R @ f_vec / self._mass
         v_new = v + dt * acc
 
