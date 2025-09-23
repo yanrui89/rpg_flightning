@@ -57,7 +57,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
     ):
         self.goal: jnp.ndarray = jnp.array([2.0, 0.0, 0.5])
         self.vgoal: jnp.ndarray = jnp.array([5.0, 5.0, 0.0])
-        theta = jnp.deg2rad(10.0)
+        theta = jnp.deg2rad(30.0)
         self.orientation_goal = jnp.array([
             [1, 0, 0],
             [0, jnp.cos(theta), -jnp.sin(theta)],
@@ -67,7 +67,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 5.0])
         )
         self.init_location = WorldBox(
-            jnp.array([0.0, -0.1, 0.3]), jnp.array([0.0, 0.1, 0.7])
+            jnp.array([0.0, 0.0, 0.3]), jnp.array([0.8, 1.5, 1.5])
         )
         self.window_centre: jnp.ndarray = jnp.array([1.0, 1.0, 0.5])
         self.init_path:jnp.ndarray = jnp.array([0.0, 1.0, 0.5])
@@ -116,14 +116,25 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             maxval=self.init_location.max #- self.margin,
         )
 
+        ref_vel = self.window_centre - p
+        norm = jnp.linalg.norm(ref_vel)
 
+        # Safe normalization
+        ref_vel_unit = jnp.where(norm > 1e-8, ref_vel / norm, jnp.zeros_like(ref_vel))
+        delta_v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
+        delta_v = jax.random.uniform(
+            key_v,
+            ref_vel.shape,
+            minval=0.5 * delta_v,
+            maxval=1.5 * delta_v,
+        )
+        v = ref_vel_unit * delta_v
         rot = random_rotation(
-            key_R, self.yaw_scale*0, self.pitch_roll_scale*0, self.pitch_roll_scale*0
+            key_R, self.yaw_scale, self.pitch_roll_scale, self.pitch_roll_scale
         )
         R = rot.as_matrix()
-        v = self.velocity_std * jax.random.normal(key_v, shape=(3,)) * 0
 
-        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,)) * 0
+        omega = self.omega_std * jax.random.normal(key_omega, shape=(3,))
 
         quadrotor_state = self.quadrotor.create_state(
             p=p, R=R, v=v, omega=omega, dr_key=key_dr
@@ -233,8 +244,8 @@ class HoveringStateEnv(env_base.Env[EnvState]):
 
         #Passing window cost
         last_p = last_state.quadrotor_state.p
-        x_last_diff = last_p[0] - 1.0
-        x_next_diff = p[0] - 1.0
+        x_last_diff = last_p[0] - self.window_centre[0]
+        x_next_diff = p[0] - self.window_centre[0]
 
         def so3_distance_atan2(R, R_tgt, eps=1e-9):
             """
@@ -254,7 +265,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         def reward_fn(_):
             a_loss = smooth_l1(self.reward_sharpness * (p - self.window_centre)) / self.reward_sharpness
             b_loss = so3_distance_atan2(last_state.quadrotor_state.R, self.orientation_goal)
-            return 5*a_loss #+ 5*b_loss
+            return 5*a_loss + 5*b_loss
         def zero_fn(_):
             # pos_cost = (
             # smooth_l1(self.reward_sharpness * (p - self.goal))
@@ -325,7 +336,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         # path_cost = logic * jnp.dot(unit_v, unit_pre_vect) + (1 - logic) * jnp.dot(unit_v, unit_post_vect)
 
 
-        cost = smoothness_cost + goal_cost + action_cost + passing_cost*50  #+ 0.5*action_cost #+ 
+        cost = smoothness_cost + goal_cost + 2*action_cost + passing_cost*50  #+ 0.5*action_cost #+ 
 
         # penalize collision
         time_left = self.max_steps_in_episode - next_state.step_idx

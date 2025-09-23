@@ -18,8 +18,17 @@ from flightning.objects.quadrotor_simple_obj import (
     quadrotor_dyn as simple_dynamics,
 )
 from flightning.objects.quadrotor_simple_obj import (
-    QuadrotorSimple,
+    quadrotor_dyn_with_res as simple_dynamics_with_res,
 )
+from flightning.objects.quadrotor_simple_obj import (
+    QuadrotorSimple,QuadrotorSimplewithRes
+)
+from flightning.models.residual_net import (
+    ResidualNetFlax,
+    ResidualNetTorch
+)
+from flax.core import freeze, unfreeze
+import torch
 import chex
 
 
@@ -121,6 +130,35 @@ class Quadrotor:
         self._gravity = jnp.array([0, 0, -9.81])
 
         self.simple_model = QuadrotorSimple(mass=mass)
+
+        self.flax_model = ResidualNetFlax(hidden=256, out_size=3)
+        rng = jax.random.key(0)
+        dummy_x = jnp.ones((1, 19))
+        params = self.flax_model.init(rng, dummy_x)
+        self.torch_model = ResidualNetTorch()
+        full_path = '/home/yanrui/tempstorage5/rpg_flightning/data/model_14.pt'
+        ckpt = torch.load(full_path, map_location="cpu")
+        state_dict = ckpt["model_state"] 
+        self.torch_model.load_state_dict(state_dict)
+        params_flax = unfreeze(params)
+
+        # Layer 0: Linear(in=20, hidden=256)
+        params_flax['params']['Dense_0']['kernel'] = jnp.array(state_dict['net.0.weight'].T.numpy())
+        params_flax['params']['Dense_0']['bias']   = jnp.array(state_dict['net.0.bias'].numpy())
+
+        # LayerNorm
+        params_flax['params']['LayerNorm_0']['scale'] = jnp.array(state_dict['net.2.weight'].numpy())
+        params_flax['params']['LayerNorm_0']['bias']  = jnp.array(state_dict['net.2.bias'].numpy())
+
+        # Layer 1: Linear(hidden=256, hidden=256)
+        params_flax['params']['Dense_1']['kernel'] = jnp.array(state_dict['net.3.weight'].T.numpy())
+        params_flax['params']['Dense_1']['bias']   = jnp.array(state_dict['net.3.bias'].numpy())
+
+        # Layer 2: Linear(hidden=256, out=6)
+        params_flax['params']['Dense_2']['kernel'] = jnp.array(state_dict['net.5.weight'].T.numpy())
+        params_flax['params']['Dense_2']['bias']   = jnp.array(state_dict['net.5.bias'].numpy())
+
+        self.params_flax = freeze(params_flax)
 
         # drag parameters
         self._drag_params = BodyDragParams(
@@ -307,6 +345,87 @@ class Quadrotor:
             return state_new, state_dot_new
 
         return _step(state, f_d, omega_d, dt)
+    
+    def step_simple_with_res(
+            self,
+            state: QuadrotorState,
+            f_d: jax.Array,
+            omega_d: jax.Array,
+            dt: jax.Array,
+    ) -> QuadrotorState:
+        """
+        :param state: quadrotor state
+        :param f_d: cumulative thrust [N]
+        :param omega_d: commanded body rates [rad/s]
+        :param dt: time step length [s]
+        :return: next state of the quadrotor
+        """
+
+        @partial(jax.custom_jvp, nondiff_argnums=(3,))
+        def _step(state, f_d, omega_d, dt):
+            """Forward pass of the quadrotor dynamics."""
+
+            dt = np.round(dt, 5)
+            if dt <= 0.0:
+                return state
+
+            p, R, v = state.p, state.R, state.v
+            a = f_d / self._mass
+
+            inputs = jnp.concatenate([
+                p.reshape(-1),          # (3,)
+                R.reshape(-1),          # (9,)
+                v.reshape(-1),          # (3,)
+                jnp.array([a]),         # (1,)
+                omega_d.reshape(-1),      # (3,)
+            ])
+            residual_world_acc = self.flax_model.apply(self.params_flax, inputs)
+
+            p_new, R_new, v_new = simple_dynamics_with_res(p = p, R= R, v = v, a = a, res_acc=residual_world_acc, omega=omega_d, dt=dt)            
+
+            return state.replace(
+                p=p_new,
+                R=R_new,
+                v=v_new,
+            )
+
+
+        @_step.defjvp
+        def _step_jvp(dt, primals, tangents):
+            """Backward pass of the quadrotor dynamics."""
+
+            state, f_d, omega_d = primals
+            p, R, v = state.p, state.R, state.v
+
+            state_dot, f_d_dot, omega_d_dot = tangents
+            p_dot, R_dot, v_dot = state_dot.p, state_dot.R, state_dot.v
+
+            state_new = _step(state, f_d, omega_d, dt)
+
+            primals_simple = (p, R, v, f_d / self._mass, omega_d, dt)
+            tangents_simple = (
+                p_dot,
+                R_dot,
+                v_dot,
+                f_d_dot / self._mass,
+                omega_d_dot,
+                0.0,
+            )
+
+            _, tan_out = jax.jvp(
+                simple_dynamics, primals_simple, tangents_simple
+            )
+
+            p_tan, R_tan, v_tan = tan_out
+
+            state_dot_new = state_dot.replace(
+                p=p_tan, R=R_tan,
+                v=v_tan, dr_key=state.dr_key
+            )
+
+            return state_new, state_dot_new
+
+        return _step(state, f_d, omega_d, dt)
 
     def _dynamics(self, state: QuadrotorState, motor_omega_d, dt):
         # unpack state
@@ -385,6 +504,42 @@ class Quadrotor:
             motor_omega=motor_omega_new,
             acc=acc,
         )
+
+    def step_simple(
+            self,
+            state: QuadrotorState,
+            f_d: jax.Array,
+            omega_d: jax.Array,
+            dt: jax.Array,
+    ) -> QuadrotorState:
+        """
+        :param state: quadrotor state
+        :param f_d: cumulative thrust [N]
+        :param omega_d: commanded body rates [rad/s]
+        :param dt: time step length [s]
+        :return: next state of the quadrotor
+        """
+
+        # @partial(jax.custom_jvp, nondiff_argnums=(3,))
+        # def _step(state, f_d, omega_d, dt):
+        """Forward pass of the quadrotor dynamics."""
+
+        # round dt to 5 decimal places to avoid numerical issues
+        dt = np.round(dt, 5)
+        if dt <= 0.0:
+            return state
+
+        p, R, v = state.p, state.R, state.v
+        a = f_d / self._mass
+        p_new, R_new, v_new = simple_dynamics(p = p,R = R,v = v,a = a, omega=omega_d,dt= dt)
+        
+
+        return state.replace(
+            p=p_new,
+            R=R_new,
+            v=v_new,
+        )
+
 
     def motor_omega_to_thrust(self, motor_omega):
         return self._thrust_map[0] * motor_omega ** 2
