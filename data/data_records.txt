@@ -1,0 +1,22 @@
+data_collected
+
+10 - First collection of 4m/s policy - Using a simple model policy
+12 - Second collection of 4m/s policy - Using a finetuned policy
+16 - First collection of 2m/s policy - Using a simple model policy
+18 - Second collection of 2m/s policy - Using a finetuned policy
+
+20 - First collection of 2m/s policy -
+
+22 - First collection of 2m/s policy in the real drone - Using a simple model
+23 - First collection of 2m/s policy in the real drone - Using a refined policy from sim
+
+26 - First collection of 2m/s policy on the real drone 2 (100Hz) - Using a simple model
+
+model
+10 - First residual dynamics using 10.pkl
+12 - Second residual dynamics using 12.pkl
+13 - Residual dynamics using 10 and 12.pkl
+
+16 - Res dyn using 16.pkl
+19 - Res dyn using data from 10,12,16 and 18
+

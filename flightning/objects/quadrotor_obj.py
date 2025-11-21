@@ -10,6 +10,7 @@ from jax import numpy as jnp
 from flightning.simulation.model_body_drag import (
     BodyDragParams,
     compute_drag_force,
+    compute_rotor_drag_force,
 )
 from flightning.utils.math import rotation_matrix_from_vector
 
@@ -91,7 +92,7 @@ class Quadrotor:
             tbm_bl=jnp.array([-0.04,  0.04, 0.0]),  # [m]
             tbm_br=jnp.array([-0.04, -0.04, 0.0]),  # [m]
             tbm_fl=jnp.array([0.04,  0.04, 0.0]),  # [m]
-            inertia=jnp.array([0.00014, 0.00016, 0.0002]),  # [kgm^2]
+            inertia=jnp.array([0.00027226, 0.00027226, 0.0003704]),  # [kgm^2]
             motor_omega_min=150.0,  # [rad/s]
             motor_omega_max=4400.0,  # [rad/s]
             motor_tau=0.033,  # [s]
@@ -127,7 +128,7 @@ class Quadrotor:
         self._rotors_config = rotors_config
         self._dt_low_level = dt_low_level
         self._gravity = jnp.array([0, 0, -9.81])
-
+ 
         self.simple_model = QuadrotorSimple(mass=mass)
 
         self.flax_model = ResidualNetFlax(hidden=256, out_size=3)
@@ -135,13 +136,13 @@ class Quadrotor:
         dummy_x = jnp.ones((1, 19))
         params = self.flax_model.init(rng, dummy_x)
         self.torch_model = ResidualNetTorch()
-        full_path = '/home/yanrui/tempstorage4/rpg_flightning/data/model_4.pt'
+        full_path = '/home/yanrui/tempstorage4/rpg_flightning/data/model_28.pt'
         ckpt = torch.load(full_path, map_location="cpu")
         state_dict = ckpt["model_state"] 
         self.torch_model.load_state_dict(state_dict)
         params_flax = unfreeze(params)
 
-        # Layer 0: Linear(in=20, hidden=256)
+        # Layer 0: Linear(in=20, hidden=256)    
         params_flax['params']['Dense_0']['kernel'] = jnp.array(state_dict['net.0.weight'].T.numpy())
         params_flax['params']['Dense_0']['bias']   = jnp.array(state_dict['net.0.bias'].numpy())
 
@@ -462,7 +463,10 @@ class Quadrotor:
         # Quadratic drag model
         f_drag = compute_drag_force(state, key_drag, self._drag_params)
 
-        f_vec = jnp.array([0, 0, jnp.sum(f)]) + f_drag
+        f_rotor_drag = compute_rotor_drag_force(state, key_drag, self._drag_params)
+
+        f_vec = jnp.array([0, 0, jnp.sum(f)]) + f_drag + f_rotor_drag 
+
         acc = self._gravity + R @ f_vec / self._mass
         v_new = v + dt * acc
 
@@ -563,11 +567,11 @@ class Quadrotor:
 
 if __name__ == "__main__":
 
-    quad = Quadrotor(mass=1.0)
+    quad = Quadrotor(mass= 0.23426002)
     state = quad.default_state()
-    f_d = jnp.array(1 * 9.81)
-    omega_d = jnp.array([0.0, 0.0, 0.01])
-    dt = 1.0
+    f_d = jnp.array(1 * 2.0)
+    omega_d = jnp.array([0.0, 2.0, 0.0])
+    dt = 0.02
     state_new = quad.step(state, f_d, omega_d, dt)
     print(state_new.p)
 

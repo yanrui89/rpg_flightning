@@ -134,14 +134,14 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         R = rot.as_matrix()
 
         init_v = self.traj_vel[rand_int]
-        delta_v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
+        # delta_v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
         delta_v = jax.random.uniform(
             key_v,
             init_v.shape,
-            minval=0.5 * delta_v,
-            maxval=1.5 * delta_v,
+            minval=0.2 * init_v,
+            maxval=1.5 * init_v,
         )
-        v = init_v * delta_v
+        v = delta_v #init_v * delta_v
 
         omega = self.omega_std * jax.random.normal(key_omega, shape=(3,))
 

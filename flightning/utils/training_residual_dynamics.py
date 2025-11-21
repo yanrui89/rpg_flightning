@@ -298,7 +298,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # parser.add_argument("--data", type=str, default="recorded_data.pkl")
     # parser.add_argument("--out", type=str, default="residual_model.pt")
-    file_num = 4
+    file_num = 28
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch", type=int, default=128)
     args = parser.parse_args()
