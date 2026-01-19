@@ -122,8 +122,21 @@ def train(
             (loss, epoch_state), grad = loss_fn(
                 train_state.params, epoch_state
             )
+            # -------- GRADIENT CLIPPING HERE --------
+            max_norm = 2.0
+            grad_norm = jnp.sqrt(
+                sum([jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(grad)])
+            )
+
+            def clip_grad(grad, grad_norm, max_norm):
+                scale = max_norm / (grad_norm + 1e-6)
+                scale = jnp.minimum(1.0, scale)  # ensures ≤ 1
+                return jax.tree_util.tree_map(lambda g: g * scale, grad)
+
+            clipped_grad = clip_grad(grad, grad_norm, max_norm)
+            # ----------------------------------------
             # update params
-            train_state = train_state.apply_gradients(grads=grad)
+            train_state = train_state.apply_gradients(grads=clipped_grad)
 
             # calc stats on grad
             leaves = jax.tree_util.tree_leaves(grad)

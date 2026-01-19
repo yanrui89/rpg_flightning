@@ -16,6 +16,12 @@ class ResidualNetFlax(nnj.Module):
         x = nnj.LayerNorm()(x)
         x = nnj.Dense(self.hidden)(x)
         x = nnj.relu(x)
+        x = nnj.LayerNorm()(x)
+        x = nnj.Dense(self.hidden)(x)
+        x = nnj.relu(x)
+        x = nnj.LayerNorm()(x)
+        x = nnj.Dense(self.hidden)(x)
+        x = nnj.relu(x)
         x = nnj.Dense(self.out_size)(x)
         return x
 
@@ -26,6 +32,12 @@ class ResidualNetTorch(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_size, hidden),
+            nn.ReLU(),
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, hidden),
             nn.ReLU(),
             nn.LayerNorm(hidden),
             nn.Linear(hidden, hidden),

@@ -61,6 +61,55 @@ class MLP(nn.Module):
         """
         x_rand = jax.random.normal(key, (self.feature_list[0],))
         return self.init(key, x_rand)
+    
+class MLP_NORM(nn.Module):
+    feature_list: list
+    nonlinearity: callable = nn.relu
+    initial_scale: float = 1.0
+    action_bias: Union[float, jnp.ndarray] = 0.0
+    out_dims_tanh: int = 0   # number of outputs to map with tanh
+    out_dims_sigmoid: int = 0  # number of outputs to map with sigmoid
+
+    @nn.compact
+    def __call__(self, x):
+        # Hidden layers
+        for feature in self.feature_list[1:-1]:
+            x = nn.Dense(
+                feature,
+                kernel_init=nn.initializers.variance_scaling(
+                    self.initial_scale, mode="fan_avg", distribution="normal"
+                ),
+                bias_init=nn.initializers.zeros,
+            )(x)
+            x = self.nonlinearity(x)
+
+        # Final layer
+        final_out_dim = self.feature_list[-1]
+        x = nn.Dense(
+            final_out_dim,
+            kernel_init=nn.initializers.variance_scaling(
+                self.initial_scale, mode="fan_avg", distribution="normal"
+            ),
+            bias_init=nn.initializers.zeros,
+        )(x)
+
+        # Apply different activations to subsets of outputs
+        outs = []
+        idx = 0
+        if self.out_dims_tanh > 0:
+            outs.append(jnp.tanh(x[..., idx: idx + self.out_dims_tanh]))
+            idx += self.out_dims_tanh
+        if self.out_dims_sigmoid > 0:
+            outs.append(nn.sigmoid(x[..., idx: idx + self.out_dims_sigmoid]))
+            idx += self.out_dims_sigmoid
+        if idx < final_out_dim:  # any leftover outputs remain linear
+            outs.append(x[..., idx:])
+
+        return jnp.concatenate(outs, axis=-1) + self.action_bias
+
+    def initialize(self, key):
+        x_rand = jax.random.normal(key, (self.feature_list[0],))
+        return self.init(key, x_rand)
 
 
 class OrthogonalMLP(MLP):

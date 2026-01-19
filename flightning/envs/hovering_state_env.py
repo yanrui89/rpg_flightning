@@ -55,9 +55,10 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         num_last_quad_states=10,
         margin=0.5,
     ):
-        self.goal: jnp.ndarray = jnp.array([2.0, 0.0, 0.5])
-        self.vgoal: jnp.ndarray = jnp.array([5.0, 5.0, 0.0])
-        theta = jnp.deg2rad(30.0)
+        self.goal: jnp.ndarray = jnp.array([3.0, 0.0, 0.5])
+        # self.goal: jnp.ndarray = jnp.array([1.5, 1.0, 0.5])
+        self.vgoal: jnp.ndarray = jnp.array([2.0, 0.0, 0.0])
+        theta = jnp.deg2rad(10.0)
         self.orientation_goal = jnp.array([
             [1, 0, 0],
             [0, jnp.cos(theta), -jnp.sin(theta)],
@@ -67,9 +68,9 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             jnp.array([-5.0, -5.0, 0.0]), jnp.array([5.0, 5.0, 5.0])
         )
         self.init_location = WorldBox(
-            jnp.array([0.0, 0.0, 0.3]), jnp.array([0.8, 1.5, 1.5])
+            jnp.array([-1.0, 0.0, 0.3]), jnp.array([0.5, 2.0, 1.5])
         )
-        self.window_centre: jnp.ndarray = jnp.array([1.0, 1.0, 0.5])
+        self.window_centre: jnp.ndarray = jnp.array([1.5, 1.0, 0.5])
         self.init_path:jnp.ndarray = jnp.array([0.0, 1.0, 0.5])
         self.max_steps_in_episode = max_steps_in_episode
         self.dt = np.array(dt)
@@ -122,13 +123,13 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         # Safe normalization
         ref_vel_unit = jnp.where(norm > 1e-8, ref_vel / norm, jnp.zeros_like(ref_vel))
         delta_v = self.velocity_std * jax.random.normal(key_v, shape=(3,))
-        delta_v = jax.random.uniform(
-            key_v,
-            ref_vel.shape,
-            minval=0.5 * delta_v,
-            maxval=1.5 * delta_v,
-        )
-        v = ref_vel_unit * delta_v
+        # delta_v = jax.random.uniform(
+        #     key_v,
+        #     ref_vel.shape,
+        #     minval=0.5 * delta_v,
+        #     maxval=1.5 * delta_v,
+        # )
+        v = ref_vel_unit * delta_v * 3.0
         rot = random_rotation(
             key_R, self.yaw_scale, self.pitch_roll_scale, self.pitch_roll_scale
         )
@@ -186,7 +187,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         dt_1 = self.delay % self.dt
         action_1 = last_actions[0]
         f_1, omega_1 = action_1[0], action_1[1:]
-        quadrotor_state = self.quadrotor.step(
+        quadrotor_state = self.quadrotor.step_simple(
             state.quadrotor_state, f_1, omega_1, dt_1
         )
 
@@ -195,7 +196,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
             dt_2 = self.dt - dt_1
             action_2 = last_actions[1]
             f_2, omega_2 = action_2[0], action_2[1:]
-            quadrotor_state = self.quadrotor.step(
+            quadrotor_state = self.quadrotor.step_simple(
                 quadrotor_state, f_2, omega_2, dt_2
             )
 
@@ -233,7 +234,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         vel_cost = 0.1 * smooth_l1(next_state.quadrotor_state.v)
         omega_cost = 0.1 * smooth_l1(next_state.quadrotor_state.omega)
         acc_cost = 0.1 * smooth_l1(acc)
-        goal_cost = pos_cost + vel_cost + omega_cost + acc_cost
+        goal_cost = pos_cost * 0 + vel_cost*0 + omega_cost + acc_cost
 
         action_cost = smooth_l1(action - self.hovering_action)
         action_cost = self.action_penalty_weight * action_cost
@@ -265,7 +266,18 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         def reward_fn(_):
             a_loss = smooth_l1(self.reward_sharpness * (p - self.window_centre)) / self.reward_sharpness
             b_loss = so3_distance_atan2(last_state.quadrotor_state.R, self.orientation_goal)
-            return 5*a_loss + 5*b_loss
+            c_loss = smooth_l1(next_state.quadrotor_state.v - self.vgoal)
+            return 5*a_loss + 5*b_loss + c_loss*0
+
+        def reward_vel_fn(_):
+            c_loss = smooth_l1(next_state.quadrotor_state.v - self.vgoal)
+            return c_loss*50
+        
+        def end_pt_reward_fn(_):
+            a_loss = -(1/ (smooth_l1(self.reward_sharpness * (p[0] - self.goal[0])) + 10)) / self.reward_sharpness
+            return 5*a_loss + vel_cost
+        
+
         def zero_fn(_):
             # pos_cost = (
             # smooth_l1(self.reward_sharpness * (p - self.goal))
@@ -307,9 +319,23 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         #     return -c_loss
 
         
-        passing_cost = lax.cond(
+        passing_vel_cost = lax.cond(
             (jnp.sign(x_last_diff) < 0) & (jnp.sign(x_next_diff) > 0),
+            reward_vel_fn,
+            zero_fn,
+            operand=None
+        )
+
+        passing_cost = lax.cond(
+            (jnp.sign(x_next_diff) < 0),
             reward_fn,
+            zero_fn,
+            operand=None
+        )
+
+        end_point_cost = lax.cond(
+            (jnp.sign(x_last_diff) > 0),
+            end_pt_reward_fn,
             zero_fn,
             operand=None
         )
@@ -336,7 +362,7 @@ class HoveringStateEnv(env_base.Env[EnvState]):
         # path_cost = logic * jnp.dot(unit_v, unit_pre_vect) + (1 - logic) * jnp.dot(unit_v, unit_post_vect)
 
 
-        cost = smoothness_cost + goal_cost + 2*action_cost + passing_cost*50  #+ 0.5*action_cost #+ 
+        cost = smoothness_cost + goal_cost + 2*action_cost + passing_cost*10 + end_point_cost + passing_vel_cost  #+ 0.5*action_cost #+ 
 
         # penalize collision
         time_left = self.max_steps_in_episode - next_state.step_idx

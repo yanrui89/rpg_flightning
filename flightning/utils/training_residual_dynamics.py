@@ -175,6 +175,9 @@ class ResidualNet(nn.Module):
             nn.LayerNorm(hidden),
             nn.Linear(hidden, hidden),
             nl(),
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, hidden),
+            nl(),
             nn.Linear(hidden, out_size)
         )
 
@@ -298,7 +301,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # parser.add_argument("--data", type=str, default="recorded_data.pkl")
     # parser.add_argument("--out", type=str, default="residual_model.pt")
-    file_num = 14
+    file_num = 52
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch", type=int, default=128)
     args = parser.parse_args()

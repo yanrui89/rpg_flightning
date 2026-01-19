@@ -136,7 +136,7 @@ class Quadrotor:
         dummy_x = jnp.ones((1, 19))
         params = self.flax_model.init(rng, dummy_x)
         self.torch_model = ResidualNetTorch()
-        full_path = '/home/yanrui/tempstorage5/rpg_flightning/data/model_14.pt'
+        full_path = '/home/yanrui/tempstorage5/rpg_flightning/data/model_7.pt'   #model 22 can go up to 50 deg # model 45 can up to 60 deg
         ckpt = torch.load(full_path, map_location="cpu")
         state_dict = ckpt["model_state"] 
         self.torch_model.load_state_dict(state_dict)
@@ -154,9 +154,25 @@ class Quadrotor:
         params_flax['params']['Dense_1']['kernel'] = jnp.array(state_dict['net.3.weight'].T.numpy())
         params_flax['params']['Dense_1']['bias']   = jnp.array(state_dict['net.3.bias'].numpy())
 
+        # LayerNorm
+        params_flax['params']['LayerNorm_1']['scale'] = jnp.array(state_dict['net.5.weight'].numpy())
+        params_flax['params']['LayerNorm_1']['bias']  = jnp.array(state_dict['net.5.bias'].numpy())
+
+        # Layer 1: Linear(hidden=256, hidden=256)
+        params_flax['params']['Dense_2']['kernel'] = jnp.array(state_dict['net.6.weight'].T.numpy())
+        params_flax['params']['Dense_2']['bias']   = jnp.array(state_dict['net.6.bias'].numpy())
+
+        # LayerNorm
+        params_flax['params']['LayerNorm_2']['scale'] = jnp.array(state_dict['net.8.weight'].numpy())
+        params_flax['params']['LayerNorm_2']['bias']  = jnp.array(state_dict['net.8.bias'].numpy())
+
+        # Layer 1: Linear(hidden=256, hidden=256)
+        params_flax['params']['Dense_3']['kernel'] = jnp.array(state_dict['net.9.weight'].T.numpy())
+        params_flax['params']['Dense_3']['bias']   = jnp.array(state_dict['net.9.bias'].numpy())
+
         # Layer 2: Linear(hidden=256, out=6)
-        params_flax['params']['Dense_2']['kernel'] = jnp.array(state_dict['net.5.weight'].T.numpy())
-        params_flax['params']['Dense_2']['bias']   = jnp.array(state_dict['net.5.bias'].numpy())
+        params_flax['params']['Dense_4']['kernel'] = jnp.array(state_dict['net.11.weight'].T.numpy())
+        params_flax['params']['Dense_4']['bias']   = jnp.array(state_dict['net.11.bias'].numpy())
 
         self.params_flax = freeze(params_flax)
 
